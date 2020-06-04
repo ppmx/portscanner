@@ -141,25 +141,9 @@ char *get_source_ip(int sockfd, char *interface)
 	return inet_ntoa(((struct sockaddr_in *) &(ifreq_ip.ifr_addr))->sin_addr);
 }
 
-char *craft_syn_packet(size_t *packet_length, char *saddr, char *sport, char *daddr, char *dport)
+void craft_syn_packet(struct iphdr *ip_header, struct tcphdr *tcp_header, char *saddr, char *sport, char *daddr, char *dport)
 {
-	char *packet;
-	struct iphdr *ip_header;
-	struct tcphdr *tcp_header;
-
-	*packet_length = sizeof(struct iphdr) + sizeof(struct tcphdr);
-
-	// Create buffer for packet:
-	if ((packet = (char *) malloc(*packet_length)) == NULL) {
-		perror("[!] malloc() failed");
-		return NULL;
-	}
-
-	memset(packet, 0, *packet_length);
-
-	// Construct IP header:
-	ip_header = (struct iphdr *) packet;
-
+	// Fill IP header:
 	ip_header->version = 4;
 	ip_header->ihl = 5;
 	ip_header->tos = 0;
@@ -172,9 +156,7 @@ char *craft_syn_packet(size_t *packet_length, char *saddr, char *sport, char *da
 	ip_header->saddr = inet_addr(saddr);
 	ip_header->daddr = inet_addr(daddr);
 
-	// Construct TCP Header:
-	tcp_header = (struct tcphdr *) (packet + sizeof(struct iphdr));
-
+	// Fill TCP Header:
 	tcp_header->source = htons(atoi(sport));
 	tcp_header->dest = htons(atoi(dport));
 	tcp_header->seq = htons(0); // htons((uint16_t) 12345);
@@ -188,11 +170,9 @@ char *craft_syn_packet(size_t *packet_length, char *saddr, char *sport, char *da
 	tcp_header->fin = 0;
 	tcp_header->window = htons((uint16_t) -1); // maximum value possible
 	tcp_header->check = htons(tcp_compute_checksum(ip_header, tcp_header));
-
-	return packet;
 }
 
-int receive_syn_response(int sockfd, char *sport)
+int receive_syn_response(int sockfd, uint32_t daddr, char *sport)
 {
 	char msg[1024];
 	int msglen;
@@ -201,10 +181,10 @@ int receive_syn_response(int sockfd, char *sport)
 		if ((size_t) msglen < (sizeof(struct iphdr) + sizeof(struct tcphdr)))
 			continue;
 
-		// struct iphdr *ip_header = (struct iphdr *) msg;
+		struct iphdr *ip_header = (struct iphdr *) msg;
 		struct tcphdr *tcp_header = (struct tcphdr *) (msg + 20);
 
-		if (ntohs(tcp_header->dest) == atoi(sport))
+		if (daddr == ip_header->saddr && ntohs(tcp_header->dest) == atoi(sport))
 			return tcp_header->rst != 1;
 	}
 
@@ -214,26 +194,32 @@ int receive_syn_response(int sockfd, char *sport)
 /* Returns 0 if the port seems to be closed, 1 if open, -1 on errors. */
 int syn_scan(int sockfd, struct addrinfo *target, char *saddr, char *sport, char *daddr, char *dport)
 {
+	struct iphdr *ip_header;
+	struct tcphdr *tcp_header;
+
 	char *packet;
-	size_t packet_length;
-	int response_value;
+	size_t packet_length = sizeof(struct iphdr) + sizeof(struct tcphdr);
 
-
-	if ((packet = craft_syn_packet(&packet_length, saddr, sport, daddr, dport)) == NULL) {
+	if ((packet = (char *) malloc(packet_length)) == NULL) {
+		perror("[!] malloc() failed");
 		return -1;
 	}
 
+	memset(packet, 0, packet_length);
+
+	ip_header = (struct iphdr *) packet;
+	tcp_header = (struct tcphdr *) (packet + sizeof(struct iphdr));
+
+	craft_syn_packet(ip_header, tcp_header, saddr, sport, daddr, dport);
+
 	if (sendto(sockfd, packet, packet_length, 0, target->ai_addr, target->ai_addrlen) == -1) {
+		free(packet);
 		perror("[!] sendto() failed");
 		return -1;
 	}
 
 	free(packet);
-
-	response_value = receive_syn_response(sockfd, sport);
-	close(sockfd);
-
-	return response_value;
+	return receive_syn_response(sockfd, ip_header->daddr, sport);
 }
 
 int main(int argc, char **argv)
@@ -270,6 +256,8 @@ int main(int argc, char **argv)
 			fprintf(stderr, "error\n");
 			break;
 	}
+
+	close(sockfd);
 
 	return 0;
 }
